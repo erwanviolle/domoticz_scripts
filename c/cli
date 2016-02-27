@@ -1,0 +1,153 @@
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <netdb.h>
+
+int samsungtv_encodeblock(char *input, char *output, int oplen){
+    int rc = 0, iplen = 0;
+    char encodedstr[5] = "";
+    char encodingtabe[64] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    iplen = strlen(input);
+    encodedstr[0] = encodingtabe[ input[0] >> 2 ];
+    encodedstr[1] = encodingtabe[ ((input[0] & 0x03) << 4) | ((input[1] & 0xf0) >> 4) ];
+    encodedstr[2] = (iplen > 1 ? encodingtabe[ ((input[1] & 0x0f) << 2) | ((input[2] & 0xc0) >> 6) ] : '=');
+    encodedstr[3] = (iplen > 2 ? encodingtabe[ input[2] & 0x3f ] : '=');
+    strncat(output, encodedstr, oplen-strlen(output));    
+    return rc;
+}
+
+int samsungtv_base64encode(char *input, char *output, int oplen){
+    int rc = 0;
+    int index = 0, ipindex = 0, iplen = 0;
+    char encoderinput[4] = "";
+    iplen = strlen(input);
+    while(ipindex < iplen){
+        for(index = 0; index < 3; index++){
+            if(ipindex < iplen)
+                encoderinput[index] = input[ipindex];
+            else
+                encoderinput[index] = 0;
+            
+            ipindex++;
+        }
+        rc = samsungtv_encodeblock(encoderinput, output, oplen);
+    }
+    return rc;
+}
+
+int samsungtv_response(int net_socket) {
+  unsigned char message[256];
+  memset (message,0x00,256);
+  int i = 3;
+  recv(net_socket,message,3,0);
+  recv(net_socket,message+i,message[1],0);
+  i += message[1];
+  recv(net_socket,message+i,2,0);
+  i += 2;
+  unsigned char response = message[i-2];
+  recv(net_socket,message+i,response,0);
+  i += response;
+  if (message[i-4] == 0x00 && message[i-3] == 0x00 && message[i-2] == 0x00 && message[i-1] == 0x00)
+      if (message[0] == 0x01) return 4;                       // success repeat keystroke...
+      else return 0;                                          // success
+  if (message[i-response] == 0x65) return 3;                  // timeoutt....
+  if (message[i-4] == 0x64 && message[i-2] == 0x00) return 1; // access denied...
+  if (message[i-4] == 0x64 && message[i-2] == 0x01) return 0; // success
+  if (message[i-response] == 0x0A) return 2;                  // waiting for user...
+  return -1;                                                  // bug!
+}
+
+int samsungtv_setlength(unsigned char message[], unsigned int length) {
+    message[0] = (unsigned char) (length & 0xFF);
+    message[1] = (unsigned char) ((length >> 8) & 0xFF);
+}
+
+int samsungtv_setstring(unsigned char message[],unsigned char string[],int base64) {
+    unsigned char s[512];
+    memset (s,0x00,512);
+    if (base64 == 1) samsungtv_base64encode(string,s,strlen(string)*2);
+    else strncpy(s,string,strlen(string));
+    samsungtv_setlength(message,strlen(s));
+    strncpy(message+2,s,strlen(s));
+    return strlen(s)+2;
+}
+
+int samsungtv_message(unsigned char string[], int net_socket, int type) {
+    unsigned char remote[] = "SamsungTVRemote";
+    unsigned char message[1024];
+    memset (message,0x00,1024);
+    unsigned int s = samsungtv_setstring(message+1,"iphone.iapp.samsung",0) + 1;
+    unsigned int i = s + 4 + (type==1?1:0);
+    i += samsungtv_setstring(message+i,string,1);
+    if (type == 0) {
+        message[s+2] = 0x64;
+        i += samsungtv_setstring(message+i,remote,1);
+        i += samsungtv_setstring(message+i,remote,1);
+    }
+    if (type == 2) {
+      message[0] = 0x01;
+      message[s+2] = 0x01;
+    }
+    samsungtv_setlength(message+s,i-s-2);
+    send(net_socket,message, i, 0);
+    return (type==2?0:samsungtv_response(net_socket));
+}
+
+int samsungtv_authenticate(unsigned char ip[], int net_socket) { return samsungtv_message
+
+(ip,net_socket,0); }
+int samsungtv_sendkey(unsigned char key[], int net_socket) { return samsungtv_message
+
+(key,net_socket,1); }
+int samsungtv_sendtext(unsigned char text[], int net_socket) { return samsungtv_message
+
+(text,net_socket,2); }
+
+int main(int argc, char *argv[]) {
+    
+    struct addrinfo hints, *res, *p;
+    int net_status, net_socket;
+    
+    if (argc < 3 || argc > 4 || (argc == 4 && strcmp(argv[2],"-T") != 0) || (argc == 3 && strcmp(argv[2],"-T") == 0)) {
+        printf("SamsungTV Remote Control CLI v0.01 April 2013 TRiXWooD\n");
+        printf("usage: STVCLI IP KEY\n");
+        printf("       STVCLI IP -T TEXT\n");
+        return 1;
+    }
+    
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC; // AF_INET or AF_INET6 to force version
+    hints.ai_socktype = SOCK_STREAM;
+        if ((net_status = getaddrinfo(argv[1],"55000", &hints, &res)) != 0) {
+        fprintf(stderr, "SamsungTV Remote: Connection Failure: (%s)\n", gai_strerror
+
+(net_status));
+        return 2;
+    }
+    net_socket = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if ((net_status = connect(net_socket, res->ai_addr, res->ai_addrlen)) != 0) {
+        fprintf(stderr, "SamsungTV Remote: Connected Failure (%s)\n", gai_strerror
+
+(net_status));
+        return 2;
+    }
+          
+   int response,auth_status = samsungtv_authenticate(argv[1],net_socket);
+    if (auth_status == 0) {
+      if (strcmp(argv[2],"-T") == 0)
+        response = samsungtv_sendtext(argv[3],net_socket);
+      else
+        response = samsungtv_sendkey(argv[2],net_socket);
+        if (response != 0 && response != 4) fprintf(stderr, "SamsungTV Remote: Bug!\n");
+        }
+    else
+    { if (auth_status == -1) fprintf(stderr, "SamsungTV Remote: Bug!\n");
+      if (auth_status == 1)  fprintf(stderr, "SamsungTV Remote: Access Denied\n");
+      if (auth_status == 2)  fprintf(stderr, "SamsungTV Remote: Waiting On User\n");
+      if (auth_status == 3)  fprintf(stderr, "SamsungTV Remote: Time Out\n");
+    }
+    
+    close(net_socket);
+    freeaddrinfo(res);
+    return 0;
+}
